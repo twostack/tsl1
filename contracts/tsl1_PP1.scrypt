@@ -1,0 +1,212 @@
+  /*
+  Copyright 2024 - Stephan M. February
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+import "util.scrypt";
+import "txUtil.scrypt";
+
+
+/*
+*
+* - PP1 - Plug Point One . Spent from Witness. Validates parent tx via push-raw-tx.
+*         Rebuilds current Txn on-chain using output side from push-raw-tx, and input
+*         side pushed by Witness Txn.
+*         Verifies that current txn scriptPubKeys are same as parent txn scriptPubKeys.
+*         Verifies Signatures over scriptPubKeys have been preserved.
+*/
+contract PlugPointOne{
+
+Ripemd160 ownerPKH; //the PKH of current owner. Token can only be spent/transferred by them
+bytes tokenId;      //
+
+constructor(Ripemd160 recipientPKH, bytes tokenId){
+    this.ownerPKH = recipientPKH;
+    this.tokenId = tokenId;
+}
+
+
+/*
+  Create a fresh issuance of the token. 
+
+  preImage - Witness Transaction's SighashPreimage (ALL | FORKID)
+  fundingTxId - Witness-Funding Transaction's TxId
+
+  FIXME: During issuance, we must validate a "signature anchor" for this
+         token. Signature must be ECDSA(sha256(LHS.input[1] + PP1), issuerPubkey)
+*/
+public function issueToken( SigHashPreimage preImage, bytes fundingTxId, bytes padding ){   
+  //assert preimage
+  require(Tx.checkPreimage(preImage));
+
+  require(len(padding) > 0);
+
+  //set the tokenId for this issuance to the Witness-Funding Transaction's TxId
+  // require(fundingTxId == this.tokenId);
+
+  //assert that the stated tokenId is same us current transactionId
+  bytes currentTxId = Util.outpoint(preImage)[:32];
+
+
+  bytes fundingOutpoint = fundingTxId + Utils.toLEUnsigned(1, 4); //output #1 
+  bytes prevOutpoint2 = currentTxId + Utils.toLEUnsigned(1, 4);  //PP1  output #1 
+  bytes prevOutpoint3 = currentTxId + Utils.toLEUnsigned(2, 4);  //PP2 output #2 
+
+
+  bytes prevHashPreImage = fundingOutpoint + prevOutpoint2 + prevOutpoint3 ;
+  bytes calcHashPrevOut = sha256(sha256(prevHashPreImage));
+
+  bytes givenHashPrevOuts = Util.hashPrevouts(preImage);
+  require(givenHashPrevOuts == calcHashPrevOut);
+
+
+  //TODO: Possible additional issuance assertions like signed hashes of Txn outputs
+
+}
+
+/*
+   preImage         - PreImage of the 
+   scriptLHS        - Left-hand-side (inputs) of the current Transaction
+   parentRawTx      - Raw Tx bytes of the parent token Txn (not the witness txn)
+   recipientPubKey  - lock to this new owner's pubkey 
+   recipientSig     - Signature of new owner needed to unlock
+*/
+public function transferToken(
+    SigHashPreimage preImage, 
+    bytes           pp2Output, 
+    PubKey          recipientPubKey, 
+    Ripemd160       changePkh, 
+    int             changeAmount, 
+    Sig             recipientSig, 
+    bytes           scriptLHS, 
+    bytes           parentRawTx,
+    bytes           padding 
+    ){
+
+    //every transfer must supply us with a parent transaction (parent to current exe context)
+    //we will use this later for inductive proof
+    require(len(parentRawTx) > 0);
+
+    //assert that *some* padding has been applied to align us on a 512bit boundary !?
+    require(len(padding) > 0);
+
+    //assert preimage
+    require(Tx.checkPreimage(preImage));
+
+    //assert P2PKH unlock conditions are met
+    require(hash160(recipientPubKey) == this.ownerPKH);
+    // require(checkSig(recipientSig, recipientPubKey));
+
+    //now rebuild the current Tx
+    // - obtain RHS template from the parentRawTx
+    // - Substitute PKH in parentTx with current ownerPKH
+    // - Leave tokenId alone, since it is expected to match that of ParentTx
+
+    Output parentPP1Output = TxUtil.readOutput(parentRawTx, 1);
+    // Output parentPP2Output = TxUtil.readOutput(parentRawTx, 2);
+    Output parentPP3Output = TxUtil.readOutput(parentRawTx, 3);
+    
+    bytes scriptPubKey = Util.scriptCode(preImage);
+    bytes pkhScript = Util.buildPublicKeyHashScript(changePkh);
+    bytes changeOutput = Util.buildOutput(pkhScript, changeAmount); //FIXME: Supply change output amount 
+    bytes pp1Output = Util.buildOutput(scriptPubKey, 1); //take pp1 output from sighashPreImage
+    bytes pp3Output = Util.buildOutput(parentPP3Output.script, 1); //take pp3 output from parent-to-tokenTx
+    bytes fullTx = scriptLHS 
+                   + Util.writeVarintNum(4) 
+                   + changeOutput + pp1Output + pp2Output + pp3Output
+                   + Util.toLEUnsigned(Util.nLocktime(preImage), 4); 
+
+    bytes currTxId = sha256(sha256(fullTx));
+    bytes outpointTxId = Util.outpoint(preImage)[:32];
+    require(currTxId == outpointTxId); //assert that we have successfully rebuilt current Tx
+
+    //now perform inductive checks of current tx against parent tx
+    //1. Assert that PP1 Token Output is the same as current tx token output
+    //grab PP1 scriptPubKey from parentRawTx
+
+    bytes parentScriptPubKey = parentPP1Output.script;
+    bytes rebuiltScriptPub = parentScriptPubKey[:114] +  this.ownerPKH + parentScriptPubKey[134:]; //20 bytes for pkh
+ 
+    require(rebuiltScriptPub == scriptPubKey);
+
+    //2. Rebuild PP2 Token Output and verify same as parent Tx
+    //FIXME: TODO !!!
+    // int fundingOutpointOffset = 0;
+    // int witnessChangePKHOffset = fundingOutpointOffset + 36; //fundingOutpoint is 36 bytes
+    // int changeAmountOffset = witnessChangePKHOffset + 20; //PKH is 20 bytes long
+    // bytes rebuiltPP2 = parentPP2Output[:fundingOutpointOffset] +  this.ownerPKH + parentScriptPubKey[133:]; //20 bytes for pkh
+
+
+    //check that second TxInput of current Tx spends from parentRawTx
+    // bytes outpoint2 = this.readOutpoint2(fullTx); //should be readOutpoint3 !?
+    bytes outpoint3 = this.readOutpoint(fullTx, 2);
+    bytes parentTxId = sha256(sha256(parentRawTx));
+
+    require(outpoint3[:32] == parentTxId);
+
+  }
+
+  //allow reclaiming of locked sats and burning of this output
+  public function burnToken( PubKey recipientPubKey, Sig recipientSig){
+
+    //assert P2PKH unlock conditions are met
+    require(hash160(recipientPubKey) == this.ownerPKH);
+    require(checkSig(recipientSig, recipientPubKey));
+  }
+
+  function readOutpoint(bytes tx, int inputIndex): bytes {
+
+    bytes outpoint= b'';
+    // first 4 bytes version
+    // 1 byte input num, only support max 3
+    int pos = 4;
+    int ninputs = Utils.fromLEUnsigned(tx[pos: pos + 1]);
+    pos = pos + 1;
+    // max support 3 input
+    // input
+    require(ninputs <= 3);
+    loop(3): i {
+      if (i < ninputs) {
+
+        if (i == inputIndex) {
+          outpoint = tx[pos:pos+36]; //very next 36 bytes is the previous outpoint.
+        }
+
+        // output point 36 bytes
+        pos = pos + 36;
+        // 1 byte var
+        // script code + 4 bytes sequence
+        int varLen = Utils.fromLEUnsigned(tx[pos: pos + 1]);
+        if (varLen < 253) {
+          int scriptLen = varLen;
+          pos = pos + 1 + scriptLen + 4;
+        } else if (varLen == 253) {
+          int scriptLen = Utils.fromLEUnsigned(tx[pos + 1: pos + 3]);
+          pos = pos + 3 + scriptLen + 4;
+        } else if (varLen == 254) {
+          int scriptLen = Utils.fromLEUnsigned(tx[pos + 1: pos + 5]);
+          pos = pos + 5 + scriptLen + 4;
+        } else {
+          int scriptLen = Utils.fromLEUnsigned(tx[pos + 1: pos + 9]);
+          pos = pos + 9 + scriptLen + 4;
+        }
+
+      }
+    }
+      return outpoint;
+  }
+
+
+
+}

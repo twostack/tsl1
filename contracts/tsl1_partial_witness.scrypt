@@ -1,0 +1,74 @@
+  /*
+  Copyright 2024 - Stephan M. February
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+import "partialSha256.scrypt";
+import "util.scrypt";
+
+
+/*
+*  Computes a sha256 hash on partial hash of the witness transaction
+* 
+*  PartialWitness - Spent from next Token Txn. Verifies that next Token Txn Input
+*                    spends from both Witness Txn and Current Token Txn. Rebuilds
+*                    Witness TxnId via Partial Sha256. Requires PushTx and PushPartialTx
+*/
+contract Tsl1WitnessCheck{
+
+    //FIXME: Need funding Tx Outpoint (for child txn)
+    public function unlock(SigHashPreimage preImage, bytes partialHash, bytes witnessPartialPreImage, bytes fundingTxId) {
+
+
+        bytes witnessHash = PartialSha256.partialSha256(partialHash, witnessPartialPreImage, b'');
+
+        //Witness TxId is sha256d of result
+        bytes witnessTxId = sha256(witnessHash);
+
+        // require(witnessTxId == witnessTxId);
+
+        bytes myOutpoint = Util.outpoint(preImage);
+        bytes witnessOutpoint = myOutpoint[:32] + Utils.toLEUnsigned(2, 4);
+
+        // witness outpoint must verify as being from 2nd output of current transaction
+        bytes witnessPartialOutpoint = witnessPartialPreImage[:36];
+        require(witnessOutpoint == witnessPartialOutpoint);
+
+        bytes hashPrevOuts = Util.hashPrevouts(preImage);
+
+
+        bytes prevOutpoint1 = fundingTxId + Utils.toLEUnsigned(1, 4);
+        bytes prevOutpoint2 = witnessTxId + Utils.toLEUnsigned(0, 4);
+
+        //calculate the sha256d hash of all outpoints in spending txn.
+        bytes calcHashPrevOuts = sha256(sha256(prevOutpoint1 + prevOutpoint2 + myOutpoint));
+        
+        //assert that child txn is spending from expected outpoints
+        require(hashPrevOuts == calcHashPrevOuts);
+
+        //Checksig after Code Separator at end of script, to remove all sha256 code from pushed preImage
+        require(Tx.checkPreimageOCS(preImage)); 
+
+
+    }
+
+  //allow reclaiming of locked sats and burning of this output
+  /*
+    public function burnToken( PubKey recipientPubKey, Sig recipientSig){
+        //assert P2PKH unlock conditions are met
+        require(hash160(recipientPubKey) == this.ownerPKH);
+        require(checkSig(recipientSig, recipientPubKey));
+    }
+    */
+}

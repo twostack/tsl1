@@ -1,0 +1,97 @@
+  /*
+  Copyright 2024 - Stephan M. February
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+     http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+import "util.scrypt";
+import "ec.scrypt";
+
+contract PlugPointTwo{
+
+    
+bytes fundingOutpoint;
+Ripemd160 witnessChangePKH;
+int changeAmount;
+
+constructor(bytes outpoint, Ripemd160 witnessChangePKH, int witnessChangeAmount){
+    this.fundingOutpoint = outpoint;
+    this.witnessChangePKH = witnessChangePKH;
+    this.changeAmount = witnessChangeAmount;
+}
+
+
+/**
+Params used to reconstruct Sighash PreImage
+outPoint - current transaction's outpoint. 
+
+Note: By enforcing a simulataneous spend of PP1&PP2 we can leave PP2 unlocked 
+    because it can only be spent if PP1's PKH puzzle is solved as well
+*/
+public function unlock(bytes tokenTxId) {
+
+    //assemble the sighash pre-image
+    bytes txVersion = b'02000000';
+
+    //expect simultaneous spend of Witness from PP1 & PP2. PP1 is locked with PKH. PP2 is unlocked but coupled to PP1.
+    bytes prevOutpoint2 = tokenTxId + Utils.toLEUnsigned(1, 4);  //PP1 
+    bytes prevOutpoint3 = tokenTxId + Utils.toLEUnsigned(2, 4);  //PP2
+    bytes thisOutpoint = tokenTxId + Utils.toLEUnsigned(2, 4);
+
+
+    bytes prevHashPreImage = this.fundingOutpoint + prevOutpoint2 + prevOutpoint3 ;
+    bytes prevHashOut = sha256(sha256(prevHashPreImage));
+
+    bytes fullSubscript = b'0079011879ac7777777777777777777777777777777777777777777777777777777777777777'; //deleted from PreImage using OP_CODE_SEP
+    bytes sequenceNumber = Util.toLEUnsigned(4294967295, 4);
+    bytes sequenceHash = sha256(sha256(sequenceNumber + sequenceNumber + sequenceNumber));
+    int nLockTime = 0;
+    bytes sigHashType = SigHash.ALL | SigHash.FORKID;
+
+    bytes changeOutputScript = Util.buildPublicKeyHashScript(this.witnessChangePKH); 
+    bytes changeOutput = num2bin(this.changeAmount, 8)  + Utils.writeVarint(changeOutputScript);
+
+    //cast sighashType into 4-byte LE
+    int tmp = unpack(sigHashType);
+
+    bytes sigBytes = num2bin(tmp, 4);
+    bytes preImage = txVersion + prevHashOut + sequenceHash           //txVersion + prevHashOut + sequenceHash
+                            + thisOutpoint 
+                            + Utils.writeVarint(fullSubscript) 
+                            + num2bin(1, 8)  //lock 1 sat in output
+                            + sequenceNumber
+                            + sha256(sha256(changeOutput)) //double hash of witness tx scriptPubKey
+                            + num2bin(nLockTime, 4)    //nLockTime
+                            + sigBytes;  //
+
+    bytes sigHash = sha256(sha256(preImage));
+
+    int hashInt = unpack(reverseBytes(sigHash , 32) + b'00');
+    Sig theSig = Tx.sign(hashInt, Tx.privKey, Tx.invK, Tx.r, Tx.rBigEndian, SigHashType(SigHash.ALL | SigHash.FORKID));
+
+***
+    require(checkSig(theSig, Tx.pubKey));
+
+
+}
+
+  //allow reclaiming of locked sats and burning of this output
+  /*
+    public function burnToken( PubKey recipientPubKey, Sig recipientSig){
+        //assert P2PKH unlock conditions are met
+        require(hash160(recipientPubKey) == this.ownerPKH);
+        require(checkSig(recipientSig, recipientPubKey));
+    }
+    */
+
+}
